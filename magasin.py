@@ -1,113 +1,112 @@
 #!/usr/bin/env python3
 """
-Henter fyllingsgrad for norske vannmagasiner fra NVE og sender til Slack.
-
-Kjører en evig løkke som sjekker klokka hvert 5. sekund, og henter/sender
-data kun i tidsvinduet 12:59-13:03 hver onsdag (NVE publiserer normalt
-nye tall ca. kl. 13:00 på onsdager).
-
+Henter fyllingsgrad for vannmagasiner fra NVE og sender til Slack.
+Designet for å trigges av cron onsdager rett før kl 13:00.
+Skriptet sjekker hyppig i opptil 15 minutter for å varsle sekundet tallene slippes.
 """
 
 import os
 import sys
 import time
 import logging
-from datetime import datetime
-
+from pathlib import Path
 import requests
 
 # --- Konfigurasjon --------------------------------------------------------
-
-NVE_URL = "https://biapi.nve.no/magasinstatistikk/api/Magasinstatistikk/HentOffentligDataSisteUke"
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
+NVE_URL = "https://biapi.nve.no/magasinstatistikk/api/Magasinstatistikk/HentOffentligDataSisteUke"
 
-SJEKK_INTERVALL_SEKUNDER = 5
-VINDU_START = (12, 59)  # (time, minutt)
-VINDU_SLUTT = (13, 3)
+# Fil for å huske hvilken uke vi sist varslet om (for å unngå duplikater)
+STATE_FILE = Path(__file__).parent / ".siste_nve_uke.txt"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+# Maks antall forsøk før skriptet gir opp (90 forsøk * 10 sek = 15 minutter)
+MAKS_FORSOK = 90
+SJEKK_INTERVALL_SEK = 10
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("nve-magasin")
 
+# Kartlegging av NVEs prisområder (omrnr)
+PRISOMRADER = {
+    1: "Østlandet (NO1)",
+    2: "Sørlandet (NO2)",
+    3: "Midt-Norge (NO3)",
+    4: "Nord-Norge (NO4)",
+    5: "Vestlandet (NO5)"
+}
 
-def er_i_vindu(naa: datetime) -> bool:
-    """Onsdag = weekday() == 2. Sjekker om klokka er innenfor vinduet."""
-    if naa.weekday() != 2:
-        return False
-    start = naa.replace(hour=VINDU_START[0], minute=VINDU_START[1], second=0, microsecond=0)
-    slutt = naa.replace(hour=VINDU_SLUTT[0], minute=VINDU_SLUTT[1], second=0, microsecond=0)
-    return start <= naa <= slutt
-
-
-def hent_fyllingsgrad_norge():
-    """Henter siste ukes data og plukker ut raden for hele landet (EL/0)."""
+def hent_data():
     resp = requests.get(NVE_URL, timeout=10)
     resp.raise_for_status()
-    data = resp.json()
+    return resp.json()
 
-    for rad in data:
-        if rad.get("omrType") == "EL" and rad.get("omrnr") == 0:
-            return rad
-    return None
+def formater_pil(endring):
+    return "📈" if endring > 0 else "📉" if endring < 0 else "➡️"
 
+def bygg_slack_melding(data):
+    """Finner nasjonale og regionale tall og bygger en Slack-vennlig tekst."""
+    nasjonal = next((r for r in data if r.get("omrType") == "EL" and r.get("omrnr") == 0), None)
+    
+    if not nasjonal:
+        return None, None
 
-def send_slack_melding(rad):
-    if not SLACK_WEBHOOK_URL:
-        logger.error("SLACK_WEBHOOK_URL er ikke satt - kan ikke sende melding")
-        return
+    aar, uke = nasjonal["iso_aar"], nasjonal["iso_uke"]
+    ny_uke_id = f"{aar}-{uke}"
 
-    endring = rad["endring_fyllingsgrad"]
-    pil = "📈" if endring > 0 else "📉" if endring < 0 else "➡️"
-
+    # 1. Nasjonale tall
+    endring_n = nasjonal["endring_fyllingsgrad"]
     tekst = (
-        f"*💧 Magasinstatistikk Norge – uke {rad['iso_uke']}/{rad['iso_aar']}*\n"
-        f"Fyllingsgrad: *{rad['fyllingsgrad']:.1f}%* "
-        f"({pil} {endring:+.1f} p.p. fra forrige uke)\n"
-        f"Volum: {rad['fylling_TWh']:.1f} TWh av {rad['kapasitet_TWh']:.1f} TWh kapasitet"
+        f"*💧 Magasinstatistikk uke {uke}/{aar}*\n\n"
+        f"*Norge totalt:* {nasjonal['fyllingsgrad']:.1f}% "
+        f"({formater_pil(endring_n)} {endring_n:+.1f} p.p.)\n"
+        f"_Volum: {nasjonal['fylling_TWh']:.1f} av {nasjonal['kapasitet_TWh']:.1f} TWh_\n\n"
     )
 
-    resp = requests.post(SLACK_WEBHOOK_URL, json={"text": tekst}, timeout=10)
-    resp.raise_for_status()
-    logger.info("Sendt melding til Slack")
+    # 2. Regionale tall (Prisområdene)
+    tekst += "*Regionale tall:*\n"
+    regioner = [r for r in data if r.get("omrType") == "NO" and r.get("omrnr") in PRISOMRADER.keys()]
+    regioner.sort(key=lambda x: x["omrnr"])
 
+    for r in regioner:
+        navn = PRISOMRADER[r["omrnr"]]
+        endring = r["endring_fyllingsgrad"]
+        tekst += f"• *{navn}:* {r['fyllingsgrad']:.1f}% ({formater_pil(endring)} {endring:+.1f} p.p.)\n"
+
+    return ny_uke_id, tekst
 
 def main():
     if not SLACK_WEBHOOK_URL:
-        logger.warning("SLACK_WEBHOOK_URL er ikke satt i miljøvariabler!")
+        logger.error("SLACK_WEBHOOK_URL er ikke satt. Avbryter.")
+        sys.exit(1)
 
-    sist_sendt_uke = None  # (iso_aar, iso_uke) - hindrer dobbel-sending i samme vindu
-    logger.info("Starter overvåking av NVE magasinstatistikk...")
+    sist_sendt_uke = STATE_FILE.read_text().strip() if STATE_FILE.exists() else ""
+    logger.info("Venter på nye tall fra NVE...")
 
-    while True:
-        naa = datetime.now()
+    for forsok in range(MAKS_FORSOK):
+        try:
+            data = hent_data()
+            ny_uke_id, melding_tekst = bygg_slack_melding(data)
 
-        if er_i_vindu(naa):
-            try:
-                rad = hent_fyllingsgrad_norge()
-                if rad:
-                    denne_uken = (rad["iso_aar"], rad["iso_uke"])
-                    if denne_uken != sist_sendt_uke:
-                        logger.info(
-                            "Nye data funnet: uke %s, fyllingsgrad %.1f%%",
-                            rad["iso_uke"], rad["fyllingsgrad"],
-                        )
-                        send_slack_melding(rad)
-                        sist_sendt_uke = denne_uken
-                    else:
-                        logger.debug("Data for denne uken er allerede sendt, venter...")
-                else:
-                    logger.warning("Fant ingen data for hele landet (EL/0) i responsen")
-            except requests.RequestException as e:
-                logger.error("Feil ved henting fra NVE: %s", e)
+            if ny_uke_id and ny_uke_id != sist_sendt_uke:
+                logger.info(f"Nye tall for {ny_uke_id} oppdaget! Sender til Slack.")
+                
+                resp = requests.post(SLACK_WEBHOOK_URL, json={"text": melding_tekst}, timeout=10)
+                resp.raise_for_status()
+                
+                # Oppdater state-filen så vi ikke sender igjen
+                STATE_FILE.write_text(ny_uke_id)
+                logger.info("Melding sendt, avslutter.")
+                sys.exit(0)
+            
+            else:
+                logger.debug(f"Forsøk {forsok+1}/{MAKS_FORSOK}: Fortsatt tall for uke {ny_uke_id}. Venter {SJEKK_INTERVALL_SEK} sek...")
 
-        time.sleep(SJEKK_INTERVALL_SEKUNDER)
+        except requests.RequestException as e:
+            logger.warning(f"Nettverksfeil mot NVE: {e}")
 
+        time.sleep(SJEKK_INTERVALL_SEK)
+
+    logger.info("Tidsavbrudd: Fant ingen nye tall i løpet av vinduet på 15 minutter.")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        logger.info("Avslutter...")
-        sys.exit(0)
+    main()
