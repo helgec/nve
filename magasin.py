@@ -69,17 +69,17 @@ def bygg_slack_melding(data):
     else:
         retning_tekst = "urendret"
 
-    # Redaksjonell ingress øverst
+    # Redaksjonell ingress
     ingress = (
         f"Den samlede fyllingsgraden i norske vannmagasin var ved slutten av uke {uke} "
         f"på {formater_komma(fylling_n)} prosent. Fyllingsgraden er da {retning_tekst} "
         f"fra uke {forrige_uke}."
     )
 
-    # Bygger Slack-meldingen
+    # Bygger Slack-meldingen - nå med ingressen i fet tekst!
     tekst = (
-        f"📢 *Nyhetsvarsel: Magasinstatistikk uke {uke}/{aar}*\n\n"
-        f"{ingress}\n\n"
+        f"*💧 Magasinstatistikk uke {uke}/{aar}*\n\n"
+        f"*{ingress}*\n\n"
         f"*Norge totalt:* {formater_komma(fylling_n)}% ({formater_pil(endring_n)} {endring_n:+.1f} p.p.)\n"
         f"_Volum: {nasjonal['fylling_TWh']:.1f} av {nasjonal['kapasitet_TWh']:.1f} TWh_\n\n"
         f"*Regionale tall (prisområder):*\n"
