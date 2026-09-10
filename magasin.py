@@ -38,8 +38,11 @@ def formater_pil(endring):
     return "📈" if endring > 0 else "📉" if endring < 0 else "➡️"
 
 def bygg_slack_melding(data):
-    # NVE bruker omrType 'EL' både for hele landet (0) og NO1-NO5 (1-5)
-    nasjonal = next((r for r in data if r.get("omrType") == "EL" and str(r.get("omrnr")) == "0"), None)
+    # Finner nasjonale tall (omrnr 0 eller omrType 'NO')
+    nasjonal = next(
+        (r for r in data if str(r.get("omrnr")) == "0" or r.get("omrType") == "NO"), 
+        None
+    )
     
     if not nasjonal:
         logger.warning("Fant ikke nasjonale tall i NVE-responsen.")
@@ -57,7 +60,8 @@ def bygg_slack_melding(data):
         f"*Regionale tall:*\n"
     )
 
-    regioner = [r for r in data if r.get("omrType") == "EL" and str(r.get("omrnr")) in PRISOMRADER]
+    # Henter prisområdene 1-5 (NO1-NO5)
+    regioner = [r for r in data if str(r.get("omrnr")) in PRISOMRADER]
     regioner.sort(key=lambda x: int(x["omrnr"]))
 
     for r in regioner:
