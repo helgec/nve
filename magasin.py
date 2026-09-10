@@ -38,7 +38,7 @@ def formater_pil(endring):
     return "📈" if endring > 0 else "📉" if endring < 0 else "➡️"
 
 def bygg_slack_melding(data):
-    # Finner nasjonale tall (omrnr 0 eller omrType 'NO')
+    # Nasjonale tall (omrnr 0 eller omrType 'NO')
     nasjonal = next(
         (r for r in data if str(r.get("omrnr")) == "0" or r.get("omrType") == "NO"), 
         None
@@ -51,23 +51,30 @@ def bygg_slack_melding(data):
     aar, uke = nasjonal["iso_aar"], nasjonal["iso_uke"]
     ny_uke_id = f"{aar}-{uke}"
 
-    endring_n = nasjonal["endring_fyllingsgrad"]
+    # Ganger med 100 for å konvertere desimaltall (0.636) til prosent (63.6%)
+    fyllingsgrad_n = nasjonal["fyllingsgrad"] * 100
+    endring_n = nasjonal["endring_fyllingsgrad"] * 100
+
     tekst = (
         f"*💧 Magasinstatistikk uke {uke}/{aar}*\n\n"
-        f"*Norge totalt:* {nasjonal['fyllingsgrad']:.1f}% "
+        f"*Norge totalt:* {fyllingsgrad_n:.1f}% "
         f"({formater_pil(endring_n)} {endring_n:+.1f} p.p.)\n"
         f"_Volum: {nasjonal['fylling_TWh']:.1f} av {nasjonal['kapasitet_TWh']:.1f} TWh_\n\n"
         f"*Regionale tall:*\n"
     )
 
-    # Henter prisområdene 1-5 (NO1-NO5)
-    regioner = [r for r in data if str(r.get("omrnr")) in PRISOMRADER]
+    # Filtrerer strengt på omrType == 'EL' for å unngå duplikater
+    regioner = [
+        r for r in data 
+        if r.get("omrType") == "EL" and str(r.get("omrnr")) in PRISOMRADER
+    ]
     regioner.sort(key=lambda x: int(x["omrnr"]))
 
     for r in regioner:
         navn = PRISOMRADER[str(r["omrnr"])]
-        endring = r["endring_fyllingsgrad"]
-        tekst += f"• *{navn}:* {r['fyllingsgrad']:.1f}% ({formater_pil(endring)} {endring:+.1f} p.p.)\n"
+        fylling = r["fyllingsgrad"] * 100
+        endring = r["endring_fyllingsgrad"] * 100
+        tekst += f"• *{navn}:* {fylling:.1f}% ({formater_pil(endring)} {endring:+.1f} p.p.)\n"
 
     return ny_uke_id, tekst
 
