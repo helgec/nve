@@ -49,13 +49,13 @@ def formater_komma(tall):
 def bygg_slack_melding(data):
     # Nasjonale tall (omrnr 0 eller omrType 'NO')
     nasjonal = next(
-        (r for r in data if str(r.get("omrnr")) == "0" or r.get("omrType") == "NO"), 
+        (r for r in data if str(r.get("omrnr")) == "0" or r.get("omrType") == "NO"),
         None
     )
-    
+
     if not nasjonal:
         logger.warning("Fant ikke nasjonale tall i NVE-responsen.")
-        return None, None
+        return None, None, None
 
     aar, uke = nasjonal["iso_aar"], nasjonal["iso_uke"]
     ny_uke_id = f"{aar}-{uke}"
@@ -91,7 +91,7 @@ def bygg_slack_melding(data):
 
     # Filtrerer strengt på omrType == 'EL' for å unngå duplikater
     regioner = [
-        r for r in data 
+        r for r in data
         if r.get("omrType") == "EL" and str(r.get("omrnr")) in PRISOMRADER
     ]
     regioner.sort(key=lambda x: int(x["omrnr"]))
@@ -105,7 +105,10 @@ def bygg_slack_melding(data):
     # Kilde/lenke nederst
     tekst += f"\n🔗 <{NVE_LENKE}|Se fullstendig magasinstatistikk hos NVE>"
 
-    return ny_uke_id, tekst
+    # Kort sammendrag til statusdashbordet
+    siste_tall = f"Uke {uke}/{aar}: {formater_komma(fylling_n)}% fylling nasjonalt ({formater_pil(endring_n)} {endring_n:+.1f} p.p.)"
+
+    return ny_uke_id, tekst, siste_tall
 
 def main():
     if not SLACK_WEBHOOK_URL:
@@ -119,16 +122,19 @@ def main():
     for forsok in range(1, MAKS_FORSOK + 1):
         try:
             data = hent_data()
-            ny_uke_id, melding_tekst = bygg_slack_melding(data)
+            ny_uke_id, melding_tekst, siste_tall = bygg_slack_melding(data)
 
             # Vellykket kontakt og henting fra NVE
-            update_status("nve_magasin", "NVE Vannmagasin-overvåker", status="OK")
+            update_status(
+                "nve_magasin", "NVE Vannmagasin-overvåker", status="OK",
+                last_message=siste_tall or "Fant ikke nasjonale tall i NVE-responsen"
+            )
 
             if ny_uke_id and ny_uke_id != sist_sendt_uke:
                 logger.info(f"Nye tall for {ny_uke_id} oppdaget! Sender til Slack...")
                 resp = requests.post(SLACK_WEBHOOK_URL, json={"text": melding_tekst}, timeout=10)
                 resp.raise_for_status()
-                
+
                 STATE_FILE.write_text(ny_uke_id)
                 logger.info("Vellykket! Melding sendt og tilstand lagret.")
                 sys.exit(0)
